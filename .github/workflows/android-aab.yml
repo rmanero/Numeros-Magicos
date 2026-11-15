@@ -1,1 +1,95 @@
+name: Build Android AAB
 
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'numeros-magicos-playstore.zip'
+      - '.github/workflows/android-aab.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Preparar Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+
+      - name: Extraer el proyecto
+        run: |
+          unzip -q numeros-magicos-playstore.zip -d .
+          test -f app/www/index.html
+          test -f app/capacitor.config.json
+
+      - name: Instalar Capacitor
+        working-directory: app
+        run: |
+          npm install --no-audit --no-fund @capacitor/core @capacitor/android
+          npm install --save-dev --no-audit --no-fund @capacitor/cli @capacitor/assets
+
+      - name: Crear proyecto Android
+        working-directory: app
+        run: |
+          npx cap add android
+          npx capacitor-assets generate --android
+          npx cap sync android
+
+      - name: Generar AAB
+        working-directory: app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew bundleRelease
+
+      - name: Firmar AAB con la clave de subida (si está configurada)
+        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' && env.ANDROID_KEYSTORE_PASSWORD != '' && env.ANDROID_KEY_ALIAS != '' && env.ANDROID_KEY_PASSWORD != '' }}
+        working-directory: app/android
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/upload-keystore.jks"
+          AAB="app/build/outputs/bundle/release/app-release.aab"
+          jarsigner -keystore "$RUNNER_TEMP/upload-keystore.jks" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -keypass "$ANDROID_KEY_PASSWORD" \
+            "$AAB" "$ANDROID_KEY_ALIAS"
+          jarsigner -verify "$AAB"
+          mkdir -p ../../dist
+          cp "$AAB" ../../dist/NumerosMagicos.aab
+          rm -f "$RUNNER_TEMP/upload-keystore.jks"
+
+      - name: Preparar AAB sin firmar (solo para pruebas)
+        if: ${{ env.ANDROID_KEYSTORE_BASE64 == '' || env.ANDROID_KEYSTORE_PASSWORD == '' || env.ANDROID_KEY_ALIAS == '' || env.ANDROID_KEY_PASSWORD == '' }}
+        working-directory: app/android
+        run: |
+          mkdir -p ../../dist
+          cp app/build/outputs/bundle/release/app-release.aab ../../dist/NumerosMagicos-unsigned.aab
+
+      - name: Publicar archivo AAB como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: Numeros-Magicos-AAB
+          path: dist/*.aab
+          if-no-files-found: error
+          retention-days: 7
